@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CardDemo — Code Node Graph</title>
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171d2b; --border: #2a3347; --text: #e6e9f0; --muted: #9aa4b8; --accent: #5aa9ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { padding: 14px 20px 10px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
+  header p { margin: 0; font-size: 13px; color: var(--muted); max-width: 1100px; line-height: 1.45; }
+  header code { color: var(--text); background: #222a3b; padding: 0 4px; border-radius: 3px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 8px 20px;
+    border-bottom: 1px solid var(--border); background: var(--panel); font-size: 13px; }
+  .toolbar .label { color: var(--muted); margin-right: 4px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border);
+    border-radius: 14px; background: #1d2435; color: var(--text); cursor: pointer; user-select: none; font-size: 12px; }
+  .chip .sw { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+  .chip .count { color: var(--muted); }
+  .chip.off { opacity: 0.4; text-decoration: line-through; }
+  button.btn { padding: 4px 10px; border: 1px solid var(--border); border-radius: 4px; background: #1d2435;
+    color: var(--text); cursor: pointer; font-size: 12px; }
+  button.btn:hover, .chip:hover { border-color: var(--accent); }
+  .edge-legend { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+  .edge-legend span::before { content: ""; display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--c);
+    vertical-align: middle; margin-right: 5px; }
+  .edge-legend span.dash::before { border-top-style: dashed; }
+  main { flex: 1; position: relative; min-height: 0; }
+  #graph { position: absolute; inset: 0; }
+  #info { position: absolute; right: 12px; top: 12px; width: 280px; max-height: calc(100% - 24px); overflow: auto;
+    background: rgba(23, 29, 43, 0.94); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px;
+    font-size: 12px; display: none; }
+  #info h3 { margin: 0 0 4px; font-size: 14px; }
+  #info .path { color: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
+  #info ul { margin: 6px 0 0; padding-left: 16px; }
+  #info li { margin: 2px 0; }
+  #hint { position: absolute; left: 12px; bottom: 10px; font-size: 11px; color: var(--muted); }
+  #error { display: none; padding: 20px; color: #ff8080; }
+  div.vis-tooltip { background: #1d2435 !important; color: var(--text) !important; border: 1px solid var(--border) !important;
+    border-radius: 4px !important; font-family: inherit !important; font-size: 12px !important; padding: 6px 8px !important;
+    white-space: normal !important; max-width: 420px; }
+  .tt-title { font-weight: 600; margin-bottom: 2px; }
+  .tt-path { font-family: ui-monospace, Menlo, Consolas, monospace; color: #b9c3d6; }
+  .tt-desc { color: var(--muted); margin-top: 2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CardDemo — Code Node Graph</h1>
+  <p>
+    <b>Persistent-Systems-Test/ts-cobol-carddemo</b> is a mainframe credit card management application (COBOL, CICS, VSAM, JCL,
+    with optional IMS DB, DB2 and IBM MQ modules) used to exercise migration and modernization tooling. Nodes are code artifacts
+    (online CICS programs in <code>app/cbl</code>, batch programs, JCL jobs in <code>app/jcl</code>, VSAM/sequential datasets and
+    external subsystems); edges are calls (XCTL/LINK), file reads/writes and job submissions/executions.
+  </p>
+</header>
+<div class="toolbar">
+  <span class="label">Groups:</span>
+  <div class="legend" id="legend"></div>
+  <button class="btn" id="showAll">Show all</button>
+  <button class="btn" id="toggleLabels">Hide edge labels</button>
+  <button class="btn" id="fit">Fit</button>
+  <button class="btn" id="physics">Pause physics</button>
+  <div class="edge-legend" id="edgeLegend"></div>
+</div>
+<main>
+  <div id="graph"></div>
+  <div id="info"></div>
+  <div id="hint">Drag nodes · scroll to zoom · hover for file path · click a node to highlight neighbors · click background to reset</div>
+  <div id="error">Could not load vis-network from unpkg.com. Check your network connection and reload.</div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var GROUPS = {
+    online:   { label: "Online (CICS)",   color: "#4f9dff", shape: "box" },
+    optional: { label: "Optional module", color: "#b07cff", shape: "box" },
+    batch:    { label: "Batch COBOL",     color: "#3ecf8e", shape: "box" },
+    data:     { label: "Data (VSAM/PS)",  color: "#ffb347", shape: "database" },
+    external: { label: "External",        color: "#ff6b6b", shape: "hexagon" },
+    jcl:      { label: "JCL job",         color: "#9aa4b8", shape: "ellipse" }
+  };
+
+  var REL = {
+    calls:    { color: "#4f9dff", dashes: false },
+    reads:    { color: "#ffb347", dashes: false },
+    writes:   { color: "#ff8c42", dashes: false },
+    "read/write": { color: "#ffcc66", dashes: false },
+    submits:  { color: "#ff6b6b", dashes: true },
+    executes: { color: "#c9d1e0", dashes: true },
+    then:     { color: "#6c7891", dashes: false },
+    input:    { color: "#ffb347", dashes: true },
+    uses:     { color: "#e57bd0", dashes: false }
+  };
+
+  // id, group, file path, description
+  var NODE_DATA = [
+    ["COSGN00C", "online", "app/cbl/COSGN00C.cbl", "Signon screen (CC00)"],
+    ["COMEN01C", "online", "app/cbl/COMEN01C.cbl", "Main menu for regular users"],
+    ["COADM01C", "online", "app/cbl/COADM01C.cbl", "Admin menu"],
+    ["COACTVWC", "online", "app/cbl/COACTVWC.cbl", "Account view"],
+    ["COACTUPC", "online", "app/cbl/COACTUPC.cbl", "Account update"],
+    ["COCRDLIC", "online", "app/cbl/COCRDLIC.cbl", "Credit card list"],
+    ["COCRDSLC", "online", "app/cbl/COCRDSLC.cbl", "Credit card view"],
+    ["COCRDUPC", "online", "app/cbl/COCRDUPC.cbl", "Credit card update"],
+    ["COTRN00C", "online", "app/cbl/COTRN00C.cbl", "Transaction list"],
+    ["COTRN01C", "online", "app/cbl/COTRN01C.cbl", "Transaction view"],
+    ["COTRN02C", "online", "app/cbl/COTRN02C.cbl", "Transaction add"],
+    ["CORPT00C", "online", "app/cbl/CORPT00C.cbl", "Transaction reports (submits batch via internal reader)"],
+    ["COBIL00C", "online", "app/cbl/COBIL00C.cbl", "Bill payment"],
+    ["COUSR00C", "online", "app/cbl/COUSR00C.cbl", "User list"],
+    ["COUSR01C", "online", "app/cbl/COUSR01C.cbl", "User add"],
+    ["COUSR02C", "online", "app/cbl/COUSR02C.cbl", "User update"],
+    ["COUSR03C", "online", "app/cbl/COUSR03C.cbl", "User delete"],
+
+    ["COPAUS0C", "optional", "app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl", "Pending authorization summary (IMS)"],
+    ["COPAUS1C", "optional", "app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl", "Pending authorization details (IMS/DB2)"],
+    ["COPAUA0C", "optional", "app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl", "Authorization request processor (MQ)"],
+    ["COTRTUPC", "optional", "app/app-transaction-type-db2/cbl/COTRTUPC.cbl", "Transaction type add/update (DB2)"],
+    ["COTRTLIC", "optional", "app/app-transaction-type-db2/cbl/COTRTLIC.cbl", "Transaction type list (DB2)"],
+    ["CODATE01", "optional", "app/app-vsam-mq/cbl/CODATE01.cbl", "System date inquiry via MQ"],
+    ["COACCT01", "optional", "app/app-vsam-mq/cbl/COACCT01.cbl", "Account inquiry via MQ"],
+
+    ["CBTRN01C", "batch", "app/cbl/CBTRN01C.cbl", "Daily transaction validation"],
+    ["CBTRN02C", "batch", "app/cbl/CBTRN02C.cbl", "Post daily transactions"],
+    ["CBTRN03C", "batch", "app/cbl/CBTRN03C.cbl", "Transaction detail report"],
+    ["CBACT04C", "batch", "app/cbl/CBACT04C.cbl", "Interest calculator"],
+    ["CBSTM03A", "batch", "app/cbl/CBSTM03A.CBL", "Statement generation"],
+    ["CBSTM03B", "batch", "app/cbl/CBSTM03B.CBL", "Statement file-access subroutine"],
+    ["CBEXPORT", "batch", "app/cbl/CBEXPORT.cbl", "Export customer data"],
+    ["CBIMPORT", "batch", "app/cbl/CBIMPORT.cbl", "Import customer data"],
+    ["CBPAUP0C", "batch", "app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl", "Purge expired authorizations (IMS)"],
+    ["COBSWAIT", "batch", "app/cbl/COBSWAIT.cbl", "Wait utility"],
+
+    ["USRSEC",      "data", "AWS.M2.CARDDEMO.USRSEC.VSAM.KSDS (app/jcl/DUSRSECJ.jcl)", "User security file"],
+    ["ACCTDATA",    "data", "AWS.M2.CARDDEMO.ACCTDATA.VSAM.KSDS (app/jcl/ACCTFILE.jcl)", "Account master"],
+    ["CARDDATA",    "data", "AWS.M2.CARDDEMO.CARDDATA.VSAM.KSDS (app/jcl/CARDFILE.jcl)", "Card master"],
+    ["CUSTDATA",    "data", "AWS.M2.CARDDEMO.CUSTDATA.VSAM.KSDS (app/jcl/CUSTFILE.jcl)", "Customer master"],
+    ["CARDXREF",    "data", "AWS.M2.CARDDEMO.CARDXREF.VSAM.KSDS (app/jcl/XREFFILE.jcl)", "Card/account/customer cross-reference"],
+    ["TRANSACT",    "data", "AWS.M2.CARDDEMO.TRANSACT.VSAM.KSDS (app/jcl/TRANFILE.jcl)", "Transaction master"],
+    ["DALYTRAN.PS", "data", "app/data/EBCDIC/AWS.M2.CARDDEMO.DALYTRAN.PS", "Daily transaction input"],
+    ["TRANTYPE",    "data", "AWS.M2.CARDDEMO.TRANTYPE.VSAM.KSDS (app/jcl/TRANTYPE.jcl)", "Transaction types"],
+    ["TRANCATG",    "data", "AWS.M2.CARDDEMO.TRANCATG.VSAM.KSDS (app/jcl/TRANCATG.jcl)", "Transaction categories"],
+    ["DISCGRP",     "data", "AWS.M2.CARDDEMO.DISCGRP.VSAM.KSDS (app/jcl/DISCGRP.jcl)", "Disclosure groups"],
+    ["TCATBALF",    "data", "AWS.M2.CARDDEMO.TCATBALF.VSAM.KSDS (app/jcl/TCATBALF.jcl)", "Transaction category balances"],
+
+    ["IMS DB",    "external", "app/app-authorization-ims-db2-mq/ims", "IMS hierarchical DB (pending authorizations)"],
+    ["DB2",       "external", "app/app-transaction-type-db2/ddl", "DB2 relational tables"],
+    ["MQ Queues", "external", "app/app-vsam-mq", "IBM MQ request/response queues"],
+
+    ["CLOSEFIL", "jcl", "app/jcl/CLOSEFIL.jcl", "Close VSAM files in CICS"],
+    ["ACCTFILE", "jcl", "app/jcl/ACCTFILE.jcl", "Load account VSAM"],
+    ["CARDFILE", "jcl", "app/jcl/CARDFILE.jcl", "Load card VSAM"],
+    ["XREFFILE", "jcl", "app/jcl/XREFFILE.jcl", "Load cross-reference VSAM"],
+    ["CUSTFILE", "jcl", "app/jcl/CUSTFILE.jcl", "Load customer VSAM"],
+    ["DUSRSECJ", "jcl", "app/jcl/DUSRSECJ.jcl", "Load user security VSAM"],
+    ["POSTTRAN", "jcl", "app/jcl/POSTTRAN.jcl", "Post daily transactions"],
+    ["INTCALC",  "jcl", "app/jcl/INTCALC.jcl", "Interest calculation"],
+    ["TRANBKP",  "jcl", "app/jcl/TRANBKP.jcl", "Back up transaction file"],
+    ["COMBTRAN", "jcl", "app/jcl/COMBTRAN.jcl", "Combine transactions"],
+    ["CREASTMT", "jcl", "app/jcl/CREASTMT.JCL", "Create statements"],
+    ["TRANIDX",  "jcl", "app/jcl/TRANIDX.jcl", "Build transaction AIX"],
+    ["OPENFIL",  "jcl", "app/jcl/OPENFIL.jcl", "Open VSAM files in CICS"],
+    ["CBPAUP0J", "jcl", "app/app-authorization-ims-db2-mq/jcl/CBPAUP0J.jcl", "Run authorization purge"]
+  ];
+
+  // from, to, relationship
+  var EDGE_DATA = [
+    ["COSGN00C", "USRSEC", "reads"],
+    ["COSGN00C", "COMEN01C", "calls"],
+    ["COSGN00C", "COADM01C", "calls"],
+
+    ["COMEN01C", "COACTVWC", "calls"],
+    ["COMEN01C", "COACTUPC", "calls"],
+    ["COMEN01C", "COCRDLIC", "calls"],
+    ["COMEN01C", "COTRN00C", "calls"],
+    ["COMEN01C", "COTRN02C", "calls"],
+    ["COMEN01C", "CORPT00C", "calls"],
+    ["COMEN01C", "COBIL00C", "calls"],
+    ["COCRDLIC", "COCRDSLC", "calls"],
+    ["COCRDLIC", "COCRDUPC", "calls"],
+    ["COTRN00C", "COTRN01C", "calls"],
+
+    ["COADM01C", "COUSR00C", "calls"],
+    ["COADM01C", "COUSR01C", "calls"],
+    ["COADM01C", "COUSR02C", "calls"],
+    ["COADM01C", "COUSR03C", "calls"],
+    ["COADM01C", "COTRTUPC", "calls"],
+    ["COADM01C", "COTRTLIC", "calls"],
+
+    ["COACTVWC", "ACCTDATA", "reads"],
+    ["COACTUPC", "ACCTDATA", "read/write"],
+    ["COCRDLIC", "CARDDATA", "reads"],
+    ["COCRDLIC", "CARDXREF", "reads"],
+    ["COCRDSLC", "CARDDATA", "reads"],
+    ["COCRDUPC", "CARDDATA", "read/write"],
+    ["COTRN00C", "TRANSACT", "reads"],
+    ["COTRN01C", "TRANSACT", "reads"],
+    ["COTRN02C", "TRANSACT", "writes"],
+    ["COBIL00C", "ACCTDATA", "read/write"],
+    ["COBIL00C", "TRANSACT", "writes"],
+    ["COUSR00C", "USRSEC", "reads"],
+    ["COUSR01C", "USRSEC", "writes"],
+    ["COUSR02C", "USRSEC", "read/write"],
+    ["COUSR03C", "USRSEC", "read/write"],
+
+    ["CORPT00C", "CBTRN03C", "submits", "internal reader"],
+    ["CBTRN03C", "TRANSACT", "reads"],
+
+    ["COPAUS0C", "IMS DB", "uses"],
+    ["COPAUS1C", "IMS DB", "uses"],
+    ["COPAUS1C", "DB2", "uses"],
+    ["COPAUA0C", "MQ Queues", "uses"],
+    ["COPAUA0C", "IMS DB", "uses"],
+    ["COPAUA0C", "DB2", "uses"],
+    ["COTRTUPC", "DB2", "uses"],
+    ["COTRTLIC", "DB2", "uses"],
+    ["CODATE01", "MQ Queues", "uses"],
+    ["COACCT01", "MQ Queues", "uses"],
+    ["COACCT01", "ACCTDATA", "reads"],
+
+    ["DALYTRAN.PS", "CBTRN01C", "input"],
+    ["CBTRN01C", "CBTRN02C", "then"],
+    ["CBTRN02C", "TRANSACT", "writes"],
+    ["CBTRN02C", "ACCTDATA", "read/write"],
+    ["CBACT04C", "ACCTDATA", "read/write"],
+    ["CBACT04C", "TRANSACT", "writes"],
+    ["CBSTM03A", "TRANSACT", "reads"],
+    ["CBSTM03A", "ACCTDATA", "reads"],
+    ["CBSTM03B", "TRANSACT", "reads"],
+    ["CBSTM03B", "ACCTDATA", "reads"],
+    ["CBPAUP0C", "IMS DB", "uses"],
+    ["ACCTDATA", "CBEXPORT", "input"],
+    ["CARDDATA", "CBEXPORT", "input"],
+    ["CUSTDATA", "CBEXPORT", "input"],
+    ["CARDXREF", "CBEXPORT", "input"],
+    ["TRANSACT", "CBEXPORT", "input"],
+    ["CBIMPORT", "ACCTDATA", "writes"],
+    ["CBIMPORT", "CARDDATA", "writes"],
+    ["CBIMPORT", "CUSTDATA", "writes"],
+    ["CBIMPORT", "CARDXREF", "writes"],
+    ["CBIMPORT", "TRANSACT", "writes"],
+
+    ["CLOSEFIL", "ACCTFILE", "then"],
+    ["CLOSEFIL", "CARDFILE", "then"],
+    ["CLOSEFIL", "XREFFILE", "then"],
+    ["CLOSEFIL", "CUSTFILE", "then"],
+    ["ACCTFILE", "DUSRSECJ", "then"],
+    ["CARDFILE", "DUSRSECJ", "then"],
+    ["XREFFILE", "DUSRSECJ", "then"],
+    ["CUSTFILE", "DUSRSECJ", "then"],
+    ["DUSRSECJ", "POSTTRAN", "then"],
+    ["POSTTRAN", "INTCALC", "then"],
+    ["INTCALC", "TRANBKP", "then"],
+    ["TRANBKP", "COMBTRAN", "then"],
+    ["COMBTRAN", "CREASTMT", "then"],
+    ["CREASTMT", "TRANIDX", "then"],
+    ["TRANIDX", "OPENFIL", "then"],
+    ["POSTTRAN", "CBTRN01C", "executes"],
+    ["INTCALC", "CBACT04C", "executes"],
+    ["CREASTMT", "CBSTM03A", "executes"],
+    ["CBPAUP0J", "CBPAUP0C", "executes"]
+  ];
+
+  if (typeof vis === "undefined" || !vis.Network) {
+    document.getElementById("error").style.display = "block";
+    return;
+  }
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  function tooltip(n) {
+    var d = el("div");
+    d.appendChild(el("div", "tt-title", n[0] + "  ·  " + GROUPS[n[1]].label));
+    d.appendChild(el("div", "tt-path", n[2]));
+    if (n[3]) d.appendChild(el("div", "tt-desc", n[3]));
+    return d;
+  }
+
+  function nodeColor(hex, dim) {
+    if (dim) return { background: "#2a3142", border: "#353e52", highlight: { background: "#2a3142", border: "#353e52" },
+                      hover: { background: "#2a3142", border: "#353e52" } };
+    return { background: hex, border: hex, highlight: { background: hex, border: "#ffffff" },
+             hover: { background: hex, border: "#ffffff" } };
+  }
+
+  var nodeInfo = {};
+  var nodes = new vis.DataSet(NODE_DATA.map(function (n) {
+    var g = GROUPS[n[1]];
+    nodeInfo[n[0]] = { group: n[1], path: n[2], desc: n[3] };
+    return {
+      id: n[0], label: n[0], group: n[1], title: tooltip(n), shape: g.shape,
+      color: nodeColor(g.color, false),
+      font: { color: n[1] === "external" ? "#e6e9f0" : "#0f1420", size: 13, face: "Segoe UI, Roboto, sans-serif" }
+    };
+  }));
+
+  var showEdgeLabels = true;
+  function edgeLabel(e) { return showEdgeLabels ? (e[3] || (e[2] === "calls" || e[2] === "then" ? "" : e[2])) : ""; }
+
+  var edges = new vis.DataSet(EDGE_DATA.map(function (e, i) {
+    var r = REL[e[2]];
+    return {
+      id: "e" + i, from: e[0], to: e[1], rel: e[2], label: edgeLabel(e), arrows: "to", dashes: r.dashes,
+      title: e[0] + " → " + e[1] + " (" + (e[3] || e[2]) + ")",
+      color: { color: r.color, highlight: "#ffffff", hover: "#ffffff", opacity: 0.85 },
+      font: { color: "#c9d1e0", size: 10, strokeWidth: 3, strokeColor: "#0f1420", align: "middle" }
+    };
+  }));
+
+  var container = document.getElementById("graph");
+  var network = new vis.Network(container, { nodes: nodes, edges: edges }, {
+    nodes: { borderWidth: 1.5, margin: 8, shadow: { enabled: true, color: "rgba(0,0,0,0.4)", size: 6 },
+             scaling: { label: { drawThreshold: 3 } } },
+    edges: { width: 1.3, smooth: { type: "dynamic" }, selectionWidth: 1.5,
+             arrows: { to: { scaleFactor: 0.6 } } },
+    physics: { stabilization: { iterations: 300 },
+               barnesHut: { gravitationalConstant: -3500, centralGravity: 0.45, springLength: 110, springConstant: 0.04, avoidOverlap: 0.25 } },
+    interaction: { hover: true, tooltipDelay: 120, navigationButtons: false, keyboard: true }
+  });
+
+  network.once("stabilizationIterationsDone", function () { network.fit(); });
+
+  // Group filter / legend
+  var hiddenGroups = {};
+  var legend = document.getElementById("legend");
+  Object.keys(GROUPS).forEach(function (g) {
+    var count = NODE_DATA.filter(function (n) { return n[1] === g; }).length;
+    var chip = el("span", "chip");
+    chip.dataset.group = g;
+    chip.title = "Click to show/hide " + GROUPS[g].label;
+    var sw = el("span", "sw"); sw.style.background = GROUPS[g].color;
+    chip.appendChild(sw);
+    chip.appendChild(el("span", null, GROUPS[g].label));
+    chip.appendChild(el("span", "count", "(" + count + ")"));
+    chip.addEventListener("click", function () { setGroupHidden(g, !hiddenGroups[g]); });
+    legend.appendChild(chip);
+  });
+
+  function setGroupHidden(g, hide) {
+    hiddenGroups[g] = hide;
+    var chip = legend.querySelector('[data-group="' + g + '"]');
+    chip.classList.toggle("off", hide);
+    nodes.update(NODE_DATA.filter(function (n) { return n[1] === g; })
+      .map(function (n) { return { id: n[0], hidden: hide }; }));
+    if (selected && nodeInfo[selected].group === g) clearHighlight();
+  }
+
+  document.getElementById("showAll").addEventListener("click", function () {
+    Object.keys(GROUPS).forEach(function (g) { if (hiddenGroups[g]) setGroupHidden(g, false); });
+  });
+
+  var edgeLegend = document.getElementById("edgeLegend");
+  Object.keys(REL).forEach(function (r) {
+    var s = el("span", REL[r].dashes ? "dash" : "", r);
+    s.style.setProperty("--c", REL[r].color);
+    edgeLegend.appendChild(s);
+  });
+
+  document.getElementById("toggleLabels").addEventListener("click", function () {
+    showEdgeLabels = !showEdgeLabels;
+    this.textContent = showEdgeLabels ? "Hide edge labels" : "Show edge labels";
+    edges.update(EDGE_DATA.map(function (e, i) { return { id: "e" + i, label: edgeLabel(e) }; }));
+  });
+
+  document.getElementById("fit").addEventListener("click", function () { network.fit({ animation: true }); });
+
+  var physicsOn = true;
+  document.getElementById("physics").addEventListener("click", function () {
+    physicsOn = !physicsOn;
+    network.setOptions({ physics: { enabled: physicsOn } });
+    this.textContent = physicsOn ? "Pause physics" : "Resume physics";
+  });
+
+  // Neighbor highlight
+  var selected = null;
+  var info = document.getElementById("info");
+
+  function highlight(id) {
+    selected = id;
+    var neighbors = {};
+    neighbors[id] = true;
+    network.getConnectedNodes(id).forEach(function (n) { neighbors[n] = true; });
+    var connectedEdges = {};
+    network.getConnectedEdges(id).forEach(function (e) { connectedEdges[e] = true; });
+
+    nodes.update(NODE_DATA.map(function (n) {
+      var dim = !neighbors[n[0]];
+      return { id: n[0], color: nodeColor(GROUPS[n[1]].color, dim),
+               font: { color: dim ? "#4a5468" : (n[1] === "external" ? "#e6e9f0" : "#0f1420") } };
+    }));
+    edges.update(EDGE_DATA.map(function (e, i) {
+      var on = connectedEdges["e" + i];
+      return { id: "e" + i, color: { color: on ? REL[e[2]].color : "#2a3142", opacity: on ? 1 : 0.35 },
+               width: on ? 2.4 : 1, font: { color: on ? "#ffffff" : "rgba(0,0,0,0)" } };
+    }));
+    showInfo(id);
+  }
+
+  function clearHighlight() {
+    selected = null;
+    nodes.update(NODE_DATA.map(function (n) {
+      return { id: n[0], color: nodeColor(GROUPS[n[1]].color, false),
+               font: { color: n[1] === "external" ? "#e6e9f0" : "#0f1420" } };
+    }));
+    edges.update(EDGE_DATA.map(function (e, i) {
+      return { id: "e" + i, color: { color: REL[e[2]].color, opacity: 0.85 }, width: 1.3, font: { color: "#c9d1e0" } };
+    }));
+    info.style.display = "none";
+  }
+
+  function showInfo(id) {
+    var n = nodeInfo[id];
+    info.innerHTML = "";
+    info.appendChild(el("h3", null, id));
+    info.appendChild(el("div", null, GROUPS[n.group].label + (n.desc ? " — " + n.desc : "")));
+    info.appendChild(el("div", "path", n.path));
+    var out = EDGE_DATA.filter(function (e) { return e[0] === id; });
+    var inc = EDGE_DATA.filter(function (e) { return e[1] === id; });
+    function list(title, arr, idx) {
+      if (!arr.length) return;
+      info.appendChild(el("div", null, title)).style.marginTop = "8px";
+      var ul = el("ul");
+      arr.forEach(function (e) { ul.appendChild(el("li", null, (e[3] || e[2]) + " · " + e[idx])); });
+      info.appendChild(ul);
+    }
+    list("Outgoing (" + out.length + ")", out, 1);
+    list("Incoming (" + inc.length + ")", inc, 0);
+    info.style.display = "block";
+  }
+
+  network.on("click", function (params) {
+    if (params.nodes.length) highlight(params.nodes[0]);
+    else clearHighlight();
+  });
+})();
+</script>
+</body>
+</html>
